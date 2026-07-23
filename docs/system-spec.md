@@ -108,6 +108,14 @@ The Svelte frontend cannot spawn arbitrary processes or read arbitrary files.
 All privileged actions pass through typed Tauri commands and Rust-side policy
 checks.
 
+### 5.7 Terminal-Native Interface
+
+The terminal is Baibo's primary interaction surface, not a decorative motif.
+Application chrome uses a restrained TUI-like visual language and
+keyboard-first interaction while preserving modern readability, accessibility,
+and platform conventions. Normative frontend rules are defined in
+[`frontend-ui-constraints.md`](frontend-ui-constraints.md).
+
 ## 6. User Roles
 
 The MVP has one local user role:

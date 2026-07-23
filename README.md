@@ -18,6 +18,9 @@ The MVP targets:
 Product goals and system requirements are documented in
 [`docs/system-spec.md`](docs/system-spec.md).
 
+Normative frontend visual and interaction rules are documented in
+[`docs/frontend-ui-constraints.md`](docs/frontend-ui-constraints.md).
+
 The implementation and acceptance sequence is documented in
 [`docs/mvp-checkpoints.md`](docs/mvp-checkpoints.md).
 
