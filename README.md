@@ -20,3 +20,43 @@ Product goals and system requirements are documented in
 
 The implementation and acceptance sequence is documented in
 [`docs/mvp-checkpoints.md`](docs/mvp-checkpoints.md).
+
+## Development
+
+Prerequisites:
+
+- Node.js 22+
+- Rust 1.77.2+
+- macOS Tauri system dependencies
+
+Commands:
+
+```bash
+npm install
+npm run tauri dev
+```
+
+Validation:
+
+```bash
+npm run check
+npm run lint
+npm test
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
+## Structure
+
+```text
+src/
+  lib/domain/       Frontend domain types
+  lib/ipc/          Typed Tauri clients
+  routes/           SvelteKit SPA routes
+src-tauri/src/
+  adapters/         Agent and infrastructure adapters
+  commands/         Tauri command boundary
+  domain/           Rust domain types
+  persistence/      Durable storage
+  services/         Application services
+```
