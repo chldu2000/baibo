@@ -24,6 +24,9 @@ Normative frontend visual and interaction rules are documented in
 The implementation and acceptance sequence is documented in
 [`docs/mvp-checkpoints.md`](docs/mvp-checkpoints.md).
 
+The CP1 workspace-registry manual acceptance script is documented in
+[`docs/cp1-acceptance.md`](docs/cp1-acceptance.md).
+
 ## Development
 
 Prerequisites:
