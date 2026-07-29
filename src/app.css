@@ -345,6 +345,41 @@ h3 {
 	font-size: 10px;
 }
 
+.topbar-status {
+	display: grid;
+	justify-items: end;
+	gap: 6px;
+	min-width: 0;
+}
+
+.provider-status {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 6px;
+	color: var(--ui-text-muted);
+	font-size: 9px;
+	white-space: nowrap;
+}
+
+.provider-status span {
+	padding: 3px 5px;
+	border: 1px solid var(--ui-border);
+}
+
+.provider-status span.available {
+	border-color: var(--ui-success);
+	color: var(--ui-success);
+}
+
+.provider-status button {
+	padding: 3px 5px;
+	border: 1px solid var(--ui-border);
+	color: var(--ui-text-secondary);
+	background: transparent;
+	font-size: 9px;
+}
+
 .host-status span {
 	width: 6px;
 	height: 6px;
@@ -629,7 +664,7 @@ h3 {
 
 .session-row {
 	display: grid;
-	grid-template-columns: 12px minmax(0, 1fr);
+	grid-template-columns: 44px minmax(0, 1fr);
 	gap: 8px;
 	width: 100%;
 	padding: 9px;
@@ -651,9 +686,13 @@ h3 {
 	border-left-color: var(--ui-accent);
 }
 
-.session-row > span:first-child {
-	color: var(--ui-success);
+.session-row .session-kind {
+	align-self: center;
+	padding: 3px 4px;
+	border: 1px solid var(--ui-border);
+	color: var(--ui-text-muted);
 	font-size: 9px;
+	text-align: center;
 }
 
 .session-row strong,
@@ -715,7 +754,7 @@ dialog::backdrop {
 	font-size: 11px;
 }
 
-.dialog-form input {
+.dialog-form input:not([type='radio']) {
 	width: 100%;
 	min-height: 36px;
 	margin-top: -10px;
@@ -724,6 +763,77 @@ dialog::backdrop {
 	border-radius: 2px;
 	color: var(--ui-text);
 	background: var(--ui-canvas);
+}
+
+.session-options {
+	display: grid;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+.session-options legend {
+	margin-bottom: 8px;
+	color: var(--ui-text-secondary);
+	font-size: 11px;
+}
+
+.session-options label {
+	display: grid;
+	grid-template-columns: 18px minmax(0, 1fr);
+	gap: 10px;
+	align-items: center;
+	min-height: 48px;
+	padding: 8px 10px;
+	border: 1px solid var(--ui-border);
+	background: var(--ui-surface);
+	cursor: pointer;
+}
+
+.session-options label:hover,
+.session-options label.active {
+	border-color: var(--ui-accent);
+	background: var(--ui-selection);
+}
+
+.session-options label.unavailable {
+	cursor: not-allowed;
+	opacity: 0.58;
+}
+
+.session-options input[type='radio'] {
+	width: 16px;
+	height: 16px;
+	margin: 0;
+	accent-color: var(--ui-accent);
+}
+
+.session-options strong,
+.session-options small {
+	display: block;
+}
+
+.session-options small {
+	margin-top: 3px;
+	color: var(--ui-text-muted);
+	font-size: 10px;
+}
+
+.provider-diagnostic,
+.trust-notice {
+	display: grid;
+	gap: 4px;
+	padding: 9px 10px;
+	border-left: 2px solid var(--ui-warning);
+	color: var(--ui-text-secondary);
+	background: var(--ui-canvas);
+	font-size: 10px;
+	line-height: 1.5;
+}
+
+.trust-notice strong {
+	color: var(--ui-warning);
 }
 
 .dialog-form > p {

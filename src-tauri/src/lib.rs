@@ -50,8 +50,16 @@ pub fn run() {
                     error.code()
                 );
             })?;
+            let provider_service =
+                services::provider::ProviderService::new(workspace_service.clone());
+            let agent_manager = services::agent::AgentManager::new(
+                provider_service.clone(),
+                terminal_manager.clone(),
+            );
             app.manage(workspace_service);
             app.manage(terminal_manager);
+            app.manage(provider_service);
+            app.manage(agent_manager);
 
             Ok(())
         })
@@ -70,6 +78,15 @@ pub fn run() {
             commands::terminal::resize_terminal,
             commands::terminal::stop_terminal,
             commands::terminal::delete_terminal,
+            commands::provider::list_providers,
+            commands::provider::refresh_providers,
+            commands::provider::get_pi_project_trust,
+            commands::provider::run_pi_rpc_probe,
+            commands::agent::list_agent_sessions,
+            commands::agent::create_agent_session,
+            commands::agent::restart_agent_session,
+            commands::agent::stop_agent_session,
+            commands::agent::delete_agent_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baibo");

@@ -68,15 +68,18 @@ impl TerminalRepository {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(TerminalError::database)?;
-        let ordinal: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(CAST(SUBSTR(title, 7) AS INTEGER)), 0) + 1
-                 FROM terminal_sessions WHERE workspace_id = ?1 AND title GLOB 'Shell [0-9]*'",
-                params![terminal.workspace_id.as_str()],
-                |row| row.get(0),
-            )
-            .map_err(TerminalError::database)?;
-        terminal.title = format!("Shell {ordinal}");
+        if terminal.auto_title {
+            let ordinal: i64 = transaction
+                .query_row(
+                    "SELECT COALESCE(MAX(CAST(SUBSTR(title, 7) AS INTEGER)), 0) + 1
+                     FROM terminal_sessions
+                     WHERE workspace_id = ?1 AND title GLOB 'Shell [0-9]*'",
+                    params![terminal.workspace_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(TerminalError::database)?;
+            terminal.title = format!("Shell {ordinal}");
+        }
         transaction
             .execute(
                 "INSERT INTO terminal_sessions (
@@ -460,6 +463,7 @@ mod tests {
                     id: TerminalId::new(),
                     workspace_id: self.workspace_id.clone(),
                     title: name.into(),
+                    auto_title: true,
                     shell: "/bin/zsh".into(),
                     cwd: self.workspace_path.to_string_lossy().into_owned(),
                     cols: 80,

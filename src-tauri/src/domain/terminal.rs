@@ -125,6 +125,7 @@ pub struct NewTerminalSession {
     pub id: TerminalId,
     pub workspace_id: WorkspaceId,
     pub title: String,
+    pub auto_title: bool,
     pub shell: String,
     pub cwd: String,
     pub cols: u16,

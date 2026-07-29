@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
     fs,
     io::{Read, Write},
     os::unix::ffi::OsStrExt,
@@ -57,19 +58,33 @@ struct SpawnedPty {
 }
 
 trait PtyBackend: Send + Sync {
-    fn spawn(&self, session: &TerminalSession, shell: &Path) -> Result<SpawnedPty, TerminalError>;
+    fn spawn(
+        &self,
+        session: &TerminalSession,
+        launch: &LaunchSpec,
+    ) -> Result<SpawnedPty, TerminalError>;
 }
 
 struct PortablePtyBackend;
 
 impl PtyBackend for PortablePtyBackend {
-    fn spawn(&self, session: &TerminalSession, shell: &Path) -> Result<SpawnedPty, TerminalError> {
+    fn spawn(
+        &self,
+        session: &TerminalSession,
+        launch: &LaunchSpec,
+    ) -> Result<SpawnedPty, TerminalError> {
         let pair = native_pty_system()
             .openpty(pty_size(session.cols, session.rows))
             .map_err(|_| TerminalError::SpawnFailed)?;
-        let mut command = CommandBuilder::new(shell);
-        command.arg("-l");
-        command.cwd(&session.cwd);
+        let mut command = CommandBuilder::new(&launch.executable);
+        command.args(launch.argv.iter());
+        command.cwd(&launch.cwd);
+        if let Some(environment) = &launch.environment {
+            command.env_clear();
+            for (key, value) in environment {
+                command.env(key, value);
+            }
+        }
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         let mut child = pair
@@ -103,6 +118,14 @@ impl PtyBackend for PortablePtyBackend {
             process_group,
         })
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LaunchSpec {
+    pub executable: PathBuf,
+    pub argv: Vec<OsString>,
+    pub cwd: PathBuf,
+    pub environment: Option<BTreeMap<OsString, OsString>>,
 }
 
 struct SubscriberHandle {
@@ -163,6 +186,14 @@ impl TerminalManager {
         self.repository.list(workspace_id)
     }
 
+    pub(crate) fn get(
+        &self,
+        workspace_id: &WorkspaceId,
+        terminal_id: &TerminalId,
+    ) -> Result<TerminalSession, TerminalError> {
+        self.repository.get_scoped(workspace_id, terminal_id)
+    }
+
     pub fn create(
         &self,
         workspace_id: WorkspaceId,
@@ -179,11 +210,18 @@ impl TerminalManager {
             .resolve_for_terminal(&workspace_id)
             .map_err(TerminalError::from_workspace)?;
         let shell = login_shell()?;
+        let launch = LaunchSpec {
+            executable: shell.clone(),
+            argv: vec![OsString::from("-l")],
+            cwd: PathBuf::from(&workspace.canonical_path),
+            environment: None,
+        };
         let terminal_id = TerminalId::new();
         let starting = self.repository.create(NewTerminalSession {
             id: terminal_id.clone(),
             workspace_id: workspace_id.clone(),
             title: String::new(),
+            auto_title: true,
             shell: path_to_string(&shell)?,
             cwd: workspace.canonical_path.clone(),
             cols,
@@ -191,7 +229,7 @@ impl TerminalManager {
             now: now_millis()?,
         })?;
 
-        match self.spawn(starting.clone(), shell) {
+        match self.spawn(starting.clone(), launch) {
             Ok(session) => Ok(session),
             Err(error) => {
                 let _ = self.repository.finish(
@@ -210,7 +248,7 @@ impl TerminalManager {
     fn spawn(
         &self,
         session: TerminalSession,
-        shell: PathBuf,
+        launch: LaunchSpec,
     ) -> Result<TerminalSession, TerminalError> {
         let SpawnedPty {
             master,
@@ -219,7 +257,7 @@ impl TerminalManager {
             killer,
             mut child,
             process_group,
-        } = self.backend.spawn(&session, &shell)?;
+        } = self.backend.spawn(&session, &launch)?;
         let (persist_tx, persist_rx) =
             mpsc::sync_channel::<PersistMessage>(PERSISTENCE_QUEUE_CHUNKS);
         let live = Arc::new(LiveTerminal {
@@ -359,6 +397,57 @@ impl TerminalManager {
         });
 
         Ok(running)
+    }
+
+    pub(crate) fn create_with_launch_spec(
+        &self,
+        workspace_id: WorkspaceId,
+        cols: u16,
+        rows: u16,
+        title: String,
+        launch: LaunchSpec,
+    ) -> Result<TerminalSession, TerminalError> {
+        validate_size(cols, rows)?;
+        let _operation = self
+            .operation_lock
+            .lock()
+            .map_err(|_| TerminalError::Internal)?;
+        let workspace = self
+            .workspace_service
+            .resolve_for_terminal(&workspace_id)
+            .map_err(TerminalError::from_workspace)?;
+        if launch.cwd != Path::new(&workspace.canonical_path) {
+            return Err(TerminalError::InvalidLaunchSpec);
+        }
+        if !is_executable(&launch.executable) {
+            return Err(TerminalError::SpawnFailed);
+        }
+        let terminal_id = TerminalId::new();
+        let starting = self.repository.create(NewTerminalSession {
+            id: terminal_id.clone(),
+            workspace_id: workspace_id.clone(),
+            title,
+            auto_title: false,
+            shell: path_to_string(&launch.executable)?,
+            cwd: workspace.canonical_path,
+            cols,
+            rows,
+            now: now_millis()?,
+        })?;
+        match self.spawn(starting.clone(), launch) {
+            Ok(session) => Ok(session),
+            Err(error) => {
+                let _ = self.repository.finish(
+                    &workspace_id,
+                    &terminal_id,
+                    TerminalStatus::Failed,
+                    None,
+                    "spawn_failed",
+                    now_millis().unwrap_or(starting.created_at),
+                );
+                Err(error)
+            }
+        }
     }
 
     pub fn attach(
@@ -716,6 +805,8 @@ pub enum TerminalError {
     Database,
     #[error("终端输入无效")]
     InvalidInput,
+    #[error("终端启动规格无效")]
+    InvalidLaunchSpec,
     #[error("终端尺寸必须为 2–500 列、1–200 行")]
     InvalidSize,
     #[error("终端内部状态不可用")]
@@ -750,6 +841,7 @@ impl TerminalError {
             Self::ChannelClosed => "terminal_channel_closed",
             Self::Database => "terminal_database_unavailable",
             Self::InvalidInput => "invalid_terminal_input",
+            Self::InvalidLaunchSpec => "invalid_terminal_launch_spec",
             Self::InvalidSize => "invalid_terminal_size",
             Self::Internal => "terminal_internal",
             Self::NotFound(_) => "terminal_not_found",
@@ -852,7 +944,7 @@ mod tests {
         fn spawn(
             &self,
             _session: &crate::domain::terminal::TerminalSession,
-            _shell: &std::path::Path,
+            _launch: &super::LaunchSpec,
         ) -> Result<SpawnedPty, TerminalError> {
             Err(TerminalError::SpawnFailed)
         }

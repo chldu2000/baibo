@@ -147,9 +147,27 @@ export class TerminalController {
 
 	updateSession = (session: TerminalSession): void => {
 		const current = this.state(session.workspaceId);
+		const exists = current.sessions.some((item) => item.id === session.id);
 		this.#set(session.workspaceId, {
 			...current,
-			sessions: current.sessions.map((item) => (item.id === session.id ? session : item))
+			sessions: exists
+				? current.sessions.map((item) => (item.id === session.id ? session : item))
+				: [session, ...current.sessions],
+			activeTerminalId: exists ? current.activeTerminalId : session.id,
+			closedTerminalIds: without(current.closedTerminalIds, session.id)
+		});
+	};
+
+	forgetSession = (workspaceId: string, terminalId: string): void => {
+		const current = this.state(workspaceId);
+		const sessions = current.sessions.filter(({ id }) => id !== terminalId);
+		this.#set(workspaceId, {
+			sessions,
+			activeTerminalId:
+				current.activeTerminalId === terminalId
+					? (sessions[0]?.id ?? null)
+					: current.activeTerminalId,
+			closedTerminalIds: without(current.closedTerminalIds, terminalId)
 		});
 	};
 

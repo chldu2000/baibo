@@ -2,24 +2,33 @@
 	import { onMount, untrack } from 'svelte';
 
 	import TerminalView from '$lib/components/TerminalView.svelte';
+	import type { AgentSession } from '$lib/domain/agent';
+	import type { ProviderId } from '$lib/domain/provider';
 	import type { TerminalSession } from '$lib/domain/terminal';
 	import type { Workspace } from '$lib/domain/workspace';
 	import { getAppInfo } from '$lib/ipc/app';
 	import { getTerminalController } from '$lib/state/terminal-context';
+	import { getProviderController } from '$lib/state/provider-context';
+	import { getAgentController } from '$lib/state/agent-context';
 	import { getWorkspaceController } from '$lib/state/workspace-context';
 
 	const controller = getWorkspaceController();
 	const terminals = getTerminalController();
+	const providers = getProviderController();
+	const agents = getAgentController();
 
 	let hostStatus = $state('正在连接桌面主进程…');
 	let selectedWorkspace = $state<Workspace | null>(null);
 	let selectedTerminal = $state<TerminalSession | null>(null);
+	let selectedAgent = $state<AgentSession | null>(null);
+	let newSessionKind = $state<'shell' | ProviderId>('shell');
 	let renameValue = $state('');
 	let screenReaderMode = $state(false);
 	let enhancedContrast = $state(false);
 	let renameDialog: HTMLDialogElement;
 	let removeDialog: HTMLDialogElement;
 	let deleteTerminalDialog: HTMLDialogElement;
+	let newSessionDialog: HTMLDialogElement;
 	let terminalStage: HTMLElement | undefined;
 
 	const activeWorkspace = $derived(
@@ -36,10 +45,19 @@
 	const activeTerminal = $derived(
 		terminalState?.sessions.find((session) => session.id === terminalState.activeTerminalId) ?? null
 	);
+	const activeAgent = $derived(
+		activeWorkspace && activeTerminal
+			? agents.byTerminal(activeWorkspace.id, activeTerminal.id)
+			: null
+	);
 
 	$effect(() => {
 		const workspaceId = activeWorkspace?.id ?? null;
-		if (workspaceId) untrack(() => void terminals.load(workspaceId));
+		if (workspaceId)
+			untrack(() => {
+				void terminals.load(workspaceId);
+				void agents.load(workspaceId);
+			});
 	});
 
 	onMount(async () => {
@@ -65,7 +83,7 @@
 	}
 
 	function guardDialogCancel(event: Event) {
-		if (controller.busy || terminals.busy) event.preventDefault();
+		if (controller.busy || terminals.busy || agents.busy || providers.busy) event.preventDefault();
 	}
 
 	async function submitRename(event: SubmitEvent) {
@@ -85,28 +103,108 @@
 		}
 	}
 
-	async function createTerminal() {
-		if (!activeWorkspace) return;
+	function terminalDimensions(): { cols: number; rows: number } {
 		const width = terminalStage?.clientWidth ?? 720;
 		const height = terminalStage?.clientHeight ?? 420;
-		const cols = Math.max(2, Math.min(500, Math.floor((width - 24) / 8)));
-		const rows = Math.max(1, Math.min(200, Math.floor((height - 20) / 17)));
-		await terminals.create(activeWorkspace.id, cols, rows);
+		return {
+			cols: Math.max(2, Math.min(500, Math.floor((width - 24) / 8))),
+			rows: Math.max(1, Math.min(200, Math.floor((height - 20) / 17)))
+		};
+	}
+
+	function showNewSessionDialog() {
+		terminals.clearError();
+		agents.clearError();
+		providers.clearError();
+		newSessionKind = 'shell';
+		providers.clearPiTrust();
+		newSessionDialog.showModal();
+	}
+
+	async function chooseSessionKind(kind: 'shell' | ProviderId) {
+		newSessionKind = kind;
+		if (kind === 'pi' && activeWorkspace) {
+			await providers.loadPiTrust(activeWorkspace.id);
+		} else {
+			providers.clearPiTrust();
+		}
+	}
+
+	async function createSession() {
+		if (!activeWorkspace) return;
+		if (
+			newSessionKind === 'pi' &&
+			(providers.piTrustLoading || providers.piTrust?.workspaceId !== activeWorkspace.id)
+		) {
+			return;
+		}
+		const { cols, rows } = terminalDimensions();
+		if (newSessionKind === 'shell') {
+			const created = await terminals.create(activeWorkspace.id, cols, rows);
+			if (created) newSessionDialog.close();
+			return;
+		}
+		const created = await agents.create(activeWorkspace.id, newSessionKind, cols, rows);
+		if (created) {
+			terminals.updateSession(created.terminal);
+			newSessionDialog.close();
+		}
 	}
 
 	function showDeleteTerminalDialog(session: TerminalSession) {
 		terminals.clearError();
+		agents.clearError();
 		selectedTerminal = session;
+		selectedAgent = activeWorkspace ? agents.byTerminal(activeWorkspace.id, session.id) : null;
 		deleteTerminalDialog.showModal();
 	}
 
 	async function confirmDeleteTerminal() {
 		if (!selectedTerminal) return;
-		await terminals.delete(selectedTerminal.workspaceId, selectedTerminal.id);
-		if (!terminals.error) {
+		if (selectedAgent) {
+			const deleted = await agents.delete(selectedAgent.workspaceId, selectedAgent.id);
+			if (deleted) terminals.forgetSession(selectedTerminal.workspaceId, selectedTerminal.id);
+		} else {
+			await terminals.delete(selectedTerminal.workspaceId, selectedTerminal.id);
+		}
+		if (!terminals.error && !agents.error) {
 			deleteTerminalDialog.close();
 			selectedTerminal = null;
+			selectedAgent = null;
 		}
+	}
+
+	async function stopActiveSession() {
+		if (!activeWorkspace || !activeTerminal) return;
+		if (activeAgent) {
+			const stopped = await agents.stop(activeWorkspace.id, activeAgent.id);
+			if (stopped) terminals.updateSession(stopped.terminal);
+		} else {
+			await terminals.stop(activeWorkspace.id, activeTerminal.id);
+		}
+	}
+
+	async function restartActiveAgent() {
+		if (!activeWorkspace || !activeAgent) return;
+		const { cols, rows } = terminalDimensions();
+		const restarted = await agents.restart(activeWorkspace.id, activeAgent.id, cols, rows);
+		if (restarted) terminals.updateSession(restarted.terminal);
+	}
+
+	function sessionKind(session: TerminalSession): 'SHELL' | 'CODEX' | 'PI' {
+		const agent = activeWorkspace ? agents.byTerminal(activeWorkspace.id, session.id) : null;
+		if (agent?.providerId === 'codex') return 'CODEX';
+		if (agent?.providerId === 'pi') return 'PI';
+		if (session.title.startsWith('Codex ')) return 'CODEX';
+		if (session.title.startsWith('Pi ')) return 'PI';
+		const executable = session.shell.split('/').at(-1);
+		if (executable === 'codex') return 'CODEX';
+		if (executable === 'pi') return 'PI';
+		return 'SHELL';
+	}
+
+	function providerAvailable(id: ProviderId): boolean {
+		return providers.provider(id)?.availability === 'available';
 	}
 
 	function isRunning(session: TerminalSession): boolean {
@@ -246,11 +344,32 @@
 					</p>
 				{/if}
 			</div>
-			<div class="host-status"><span aria-hidden="true"></span>{hostStatus}</div>
+			<div class="topbar-status">
+				<div class="provider-status" aria-label="Agent provider 状态" aria-live="polite">
+					{#each providers.providers as provider (provider.id)}
+						<span
+							class:available={provider.availability === 'available'}
+							title={provider.diagnostic?.message ?? provider.executablePath ?? undefined}
+						>
+							{provider.id.toUpperCase()} · {provider.version ??
+								provider.availability.toUpperCase()}
+						</span>
+					{/each}
+					<button
+						type="button"
+						disabled={providers.busy}
+						onclick={() => providers.refresh()}
+						aria-label="刷新 Agent provider 检测"
+					>
+						{providers.refreshing ? 'REFRESHING…' : 'REFRESH'}
+					</button>
+				</div>
+				<div class="host-status"><span aria-hidden="true"></span>{hostStatus}</div>
+			</div>
 		</header>
 
-		{#if (controller.error && !selectedWorkspace) || (terminals.error && !selectedTerminal)}
-			{@const error = controller.error ?? terminals.error}
+		{#if (controller.error && !selectedWorkspace) || (terminals.error && !selectedTerminal) || agents.error || providers.error}
+			{@const error = controller.error ?? terminals.error ?? agents.error ?? providers.error}
 			<div class="error-banner" role="alert">
 				{#if error}
 					<span><strong>[{error.code}]</strong> {error.message}</span>
@@ -261,6 +380,8 @@
 					onclick={() => {
 						controller.clearError();
 						terminals.clearError();
+						agents.clearError();
+						providers.clearError();
 					}}>×</button
 				>
 			</div>
@@ -284,20 +405,22 @@
 				</button>
 			</section>
 		{:else}
-			<section class="workspace-grid" aria-label={`${activeWorkspace.name} 终端工作区`}>
-				<aside class="panel sessions-panel" aria-label="终端会话">
+			<section class="workspace-grid" aria-label={`${activeWorkspace.name} 会话工作区`}>
+				<aside class="panel sessions-panel" aria-label="Shell 与 Agent 会话">
 					<div class="panel-heading">
 						<div>
-							<p class="eyebrow">TERMINALS</p>
-							<h2>Shell 会话</h2>
+							<p class="eyebrow">SESSIONS</p>
+							<h2>Shell / Agent</h2>
 						</div>
 						<button
 							class="compact-action"
 							type="button"
-							disabled={terminals.busy}
-							onclick={createTerminal}
+							disabled={terminals.busy || agents.busy}
+							onclick={showNewSessionDialog}
 						>
-							{terminals.pendingAction === 'creating' ? '[…]' : '[+] 新建'}
+							{terminals.pendingAction === 'creating' || agents.pendingAction === 'creating'
+								? '[…]'
+								: '[+] 新建'}
 						</button>
 					</div>
 					{#if terminals.pendingAction === 'loading' && terminalState?.sessions.length === 0}
@@ -305,8 +428,8 @@
 					{:else if terminalState?.sessions.length === 0}
 						<div class="panel-empty session-empty">
 							<p class="ascii-mark" aria-hidden="true">[ NO PTY ]</p>
-							<h3>尚未创建终端</h3>
-							<p>显式创建一个登录 Shell；不会自动启动 Agent。</p>
+							<h3>尚未创建会话</h3>
+							<p>显式创建登录 Shell、Codex 或 Pi；不会自动启动进程。</p>
 						</div>
 					{:else}
 						<div class="session-items">
@@ -317,7 +440,7 @@
 									type="button"
 									onclick={() => terminals.select(activeWorkspace.id, session.id)}
 								>
-									<span aria-hidden="true">{isRunning(session) ? '●' : '○'}</span>
+									<span class="session-kind">{sessionKind(session)}</span>
 									<span>
 										<strong>{session.title}</strong>
 										<small>{terminalStatus(session)}</small>
@@ -387,16 +510,28 @@
 								{#if isRunning(activeTerminal)}
 									<button
 										type="button"
-										disabled={terminals.busy}
-										onclick={() => terminals.stop(activeWorkspace.id, activeTerminal.id)}
+										disabled={terminals.busy || agents.busy}
+										onclick={stopActiveSession}
 									>
-										{terminals.pendingAction === 'stopping' ? '停止中…' : 'Stop'}
+										{terminals.pendingAction === 'stopping' || agents.pendingAction === 'stopping'
+											? '停止中…'
+											: 'Stop'}
 									</button>
 								{:else}
+									{#if activeAgent}
+										<button
+											type="button"
+											disabled={agents.busy}
+											title="创建新的 provider conversation，不恢复原会话"
+											onclick={restartActiveAgent}
+										>
+											{agents.pendingAction === 'restarting' ? '启动中…' : '重新开始'}
+										</button>
+									{/if}
 									<button
 										class="danger-action"
 										type="button"
-										disabled={terminals.busy}
+										disabled={terminals.busy || agents.busy}
 										onclick={() => showDeleteTerminalDialog(activeTerminal)}
 									>
 										删除记录
@@ -420,21 +555,126 @@
 								<p class="ascii-mark" aria-hidden="true">&gt;_</p>
 								<h3>没有打开的终端视图</h3>
 								<p>从左侧重新打开已有会话，或新建登录 Shell。</p>
-								<button type="button" disabled={terminals.busy} onclick={createTerminal}>
-									[+] 新建终端
+								<button
+									type="button"
+									disabled={terminals.busy || agents.busy}
+									onclick={showNewSessionDialog}
+								>
+									[+] 新建会话
 								</button>
 							</div>
 						{/if}
 					</div>
 					<footer>
 						<span>{activeWorkspace.gitRepository ? 'GIT REPOSITORY' : 'LOCAL DIRECTORY'}</span>
-						<span>{activeTerminal ? `${activeTerminal.cols}×${activeTerminal.rows}` : 'CP2'}</span>
+						<span
+							>{activeTerminal
+								? `${sessionKind(activeTerminal)} · ${activeTerminal.cols}×${activeTerminal.rows}`
+								: 'CP3'}</span
+						>
 					</footer>
 				</article>
 			</section>
 		{/if}
 	</main>
 </div>
+
+<dialog
+	bind:this={newSessionDialog}
+	aria-labelledby="new-session-title"
+	oncancel={guardDialogCancel}
+	onclose={() => {
+		newSessionKind = 'shell';
+		providers.clearPiTrust();
+	}}
+>
+	<div class="dialog-form">
+		<div>
+			<p class="eyebrow">NEW SESSION</p>
+			<h2 id="new-session-title">新建 Shell 或 Agent 会话</h2>
+		</div>
+		<fieldset class="session-options">
+			<legend>会话类型</legend>
+			<label class:active={newSessionKind === 'shell'}>
+				<input
+					type="radio"
+					name="session-kind"
+					value="shell"
+					checked={newSessionKind === 'shell'}
+					onchange={() => chooseSessionKind('shell')}
+				/>
+				<span><strong>SHELL</strong><small>用户登录 Shell</small></span>
+			</label>
+			{#each providers.providers as provider (provider.id)}
+				<label
+					class:active={newSessionKind === provider.id}
+					class:unavailable={provider.availability !== 'available'}
+				>
+					<input
+						type="radio"
+						name="session-kind"
+						value={provider.id}
+						checked={newSessionKind === provider.id}
+						disabled={provider.availability !== 'available'}
+						onchange={() => chooseSessionKind(provider.id)}
+					/>
+					<span>
+						<strong>{provider.id.toUpperCase()}</strong>
+						<small>{provider.version ?? provider.availability.toUpperCase()}</small>
+					</span>
+				</label>
+				{#if provider.availability !== 'available' && provider.diagnostic}
+					<div class="provider-diagnostic">
+						<strong>[{provider.diagnostic.code}]</strong>
+						<span>{provider.diagnostic.message}</span>
+						{#if provider.diagnostic.recovery}<span>{provider.diagnostic.recovery}</span>{/if}
+					</div>
+				{/if}
+			{/each}
+		</fieldset>
+		{#if newSessionKind === 'pi' && providers.piTrustLoading}
+			<div class="trust-notice" aria-live="polite">
+				<strong>PI TRUST · CHECKING…</strong>
+				<span>正在读取当前工作空间的 Pi trust 状态。</span>
+			</div>
+		{:else if newSessionKind === 'pi' && providers.piTrust && providers.piTrust.workspaceId === activeWorkspace?.id}
+			<div class="trust-notice" aria-live="polite">
+				<strong>PI TRUST · {providers.piTrust.state.toUpperCase()}</strong>
+				<span>{providers.piTrust.message}</span>
+			</div>
+		{/if}
+		{#if terminals.error || agents.error || providers.error}
+			{@const error = terminals.error ?? agents.error ?? providers.error}
+			{#if error}
+				<div class="dialog-error" role="alert">
+					<strong>[{error.code}]</strong>
+					<span>{error.message}</span>
+				</div>
+			{/if}
+		{/if}
+		<div class="dialog-actions">
+			<button
+				type="button"
+				disabled={terminals.busy || agents.busy}
+				onclick={() => newSessionDialog.close()}>取消</button
+			>
+			<button
+				class="primary-action"
+				type="button"
+				disabled={terminals.busy ||
+					agents.busy ||
+					(newSessionKind === 'pi' &&
+						(providers.piTrustLoading || providers.piTrust?.workspaceId !== activeWorkspace?.id)) ||
+					(newSessionKind !== 'shell' && !providerAvailable(newSessionKind))}
+				onclick={createSession}
+			>
+				{terminals.pendingAction === 'creating' || agents.pendingAction === 'creating'
+					? '启动中…'
+					: '创建并打开'}
+			</button>
+		</div>
+	</div>
+</dialog>
 
 <dialog
 	bind:this={renameDialog}
@@ -478,31 +718,44 @@
 	bind:this={deleteTerminalDialog}
 	aria-labelledby="delete-terminal-title"
 	oncancel={guardDialogCancel}
-	onclose={() => (selectedTerminal = null)}
+	onclose={() => {
+		selectedTerminal = null;
+		selectedAgent = null;
+	}}
 >
 	<div class="dialog-form">
 		<div>
 			<p class="eyebrow danger-text">DELETE TERMINAL RECORD</p>
 			<h2 id="delete-terminal-title">删除“{selectedTerminal?.title}”的记录？</h2>
 		</div>
-		<p>将删除该终端的会话记录和最多 2 MiB 回放日志，不会删除工作空间中的任何文件。</p>
-		{#if terminals.error}
+		<p>
+			将删除该{selectedAgent ? ' Agent' : '终端'}会话记录和最多 2 MiB
+			回放日志，不会删除工作空间中的任何文件。
+		</p>
+		{#if terminals.error || agents.error}
+			{@const error = terminals.error ?? agents.error}
 			<div class="dialog-error" role="alert">
-				<strong>[{terminals.error.code}]</strong>
-				<span>{terminals.error.message}</span>
+				{#if error}
+					<strong>[{error.code}]</strong>
+					<span>{error.message}</span>
+				{/if}
 			</div>
 		{/if}
 		<div class="dialog-actions">
-			<button type="button" disabled={terminals.busy} onclick={() => deleteTerminalDialog.close()}
-				>取消</button
+			<button
+				type="button"
+				disabled={terminals.busy || agents.busy}
+				onclick={() => deleteTerminalDialog.close()}>取消</button
 			>
 			<button
 				class="danger-button"
 				type="button"
-				disabled={terminals.busy}
+				disabled={terminals.busy || agents.busy}
 				onclick={confirmDeleteTerminal}
 			>
-				{terminals.pendingAction === 'deleting' ? '删除中…' : '删除记录与日志'}
+				{terminals.pendingAction === 'deleting' || agents.pendingAction === 'deleting'
+					? '删除中…'
+					: '删除记录与日志'}
 			</button>
 		</div>
 	</div>
