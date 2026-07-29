@@ -743,6 +743,116 @@ dialog::backdrop {
 	background: rgb(5 7 10 / 72%);
 }
 
+.session-detail-dialog {
+	width: min(720px, calc(100vw - 48px));
+	max-height: calc(100vh - 48px);
+	overflow: auto;
+}
+
+.session-detail {
+	gap: 20px;
+}
+
+.detail-heading {
+	display: flex;
+	align-items: start;
+	justify-content: space-between;
+	gap: 16px;
+}
+
+.detail-heading button {
+	min-height: 32px;
+	padding: 6px 10px;
+	border: 1px solid var(--ui-border-strong);
+	color: var(--ui-text-secondary);
+	background: var(--ui-canvas);
+}
+
+.detail-section {
+	display: grid;
+	gap: 10px;
+	padding-top: 16px;
+	border-top: 1px solid var(--ui-border);
+}
+
+.detail-section h3 {
+	margin: 0;
+	color: var(--ui-text);
+	font-size: 12px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+
+.detail-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px 16px;
+	margin: 0;
+}
+
+.detail-grid > div {
+	min-width: 0;
+}
+
+.detail-grid .detail-wide {
+	grid-column: 1 / -1;
+}
+
+.detail-grid dt {
+	color: var(--ui-text-muted);
+	font-size: 10px;
+	text-transform: uppercase;
+}
+
+.detail-grid dd {
+	margin: 3px 0 0;
+	overflow-wrap: anywhere;
+	color: var(--ui-text-secondary);
+	font-size: 12px;
+}
+
+.detail-grid code {
+	user-select: text;
+	color: var(--ui-text);
+	white-space: normal;
+}
+
+.lifecycle-list {
+	display: grid;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.lifecycle-list li {
+	display: grid;
+	grid-template-columns: minmax(130px, auto) 1fr;
+	gap: 3px 12px;
+	padding: 8px 10px;
+	border-left: 2px solid var(--ui-border-strong);
+	background: var(--ui-canvas);
+}
+
+.lifecycle-list time {
+	color: var(--ui-text-secondary);
+	text-align: right;
+}
+
+.lifecycle-list small {
+	grid-column: 1 / -1;
+	color: var(--ui-text-muted);
+}
+
+.detail-warning {
+	margin: 0;
+	padding: 8px 10px;
+	border: 1px solid var(--ui-warning);
+	color: var(--ui-text-secondary);
+	background: var(--ui-canvas);
+	line-height: 1.5;
+}
+
 .dialog-form {
 	display: grid;
 	gap: 16px;

@@ -15,6 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use serde::Serialize;
 use serde_json::Value;
 use thiserror::Error;
@@ -22,7 +25,7 @@ use thiserror::Error;
 use crate::{
     adapters::provider::{adapters, ProviderAdapter},
     domain::{
-        agent::AgentSessionId,
+        agent::{AgentLaunchSnapshot, AgentSessionId},
         provider::{
             PiProjectTrust, PiProjectTrustState, PiRpcProbeResult, ProviderAvailability,
             ProviderDiagnostic, ProviderId, ProviderInfo,
@@ -60,15 +63,26 @@ struct DetectedProvider {
     executable: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 struct DetectionCache {
     environment: LoginEnvironment,
     providers: BTreeMap<ProviderId, DetectedProvider>,
 }
 
+type ProviderDetector = dyn Fn() -> Result<DetectionCache, ProviderError> + Send + Sync + 'static;
+
 #[derive(Clone)]
 pub struct ProviderService {
     workspace_service: WorkspaceService,
     cache: Arc<Mutex<Option<Arc<DetectionCache>>>>,
+    detector: Arc<ProviderDetector>,
+    #[cfg(test)]
+    detection_count: Arc<AtomicUsize>,
+}
+
+pub(crate) struct PreparedAgentLaunch {
+    pub launch: LaunchSpec,
+    pub snapshot: AgentLaunchSnapshot,
 }
 
 impl ProviderService {
@@ -76,6 +90,9 @@ impl ProviderService {
         Self {
             workspace_service,
             cache: Arc::new(Mutex::new(None)),
+            detector: Arc::new(detect_providers),
+            #[cfg(test)]
+            detection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -97,21 +114,35 @@ impl ProviderService {
             capabilities: adapter.capabilities(),
             diagnostic: None,
         };
+        let detection = DetectionCache {
+            environment: LoginEnvironment {
+                values: environment,
+            },
+            providers: BTreeMap::from([(
+                provider_id,
+                DetectedProvider {
+                    info,
+                    executable: Some(executable),
+                },
+            )]),
+        };
+        let refreshed = detection.clone();
+        let detection_count = Arc::new(AtomicUsize::new(0));
+        let detector_count = detection_count.clone();
         Self {
             workspace_service,
-            cache: Arc::new(Mutex::new(Some(Arc::new(DetectionCache {
-                environment: LoginEnvironment {
-                    values: environment,
-                },
-                providers: BTreeMap::from([(
-                    provider_id,
-                    DetectedProvider {
-                        info,
-                        executable: Some(executable),
-                    },
-                )]),
-            })))),
+            cache: Arc::new(Mutex::new(Some(Arc::new(detection)))),
+            detector: Arc::new(move || {
+                detector_count.fetch_add(1, Ordering::SeqCst);
+                Ok(refreshed.clone())
+            }),
+            detection_count,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detection_count(&self) -> usize {
+        self.detection_count.load(Ordering::SeqCst)
     }
 
     pub fn list(&self) -> Result<Vec<ProviderInfo>, ProviderError> {
@@ -124,7 +155,7 @@ impl ProviderService {
     }
 
     pub fn refresh(&self) -> Result<Vec<ProviderInfo>, ProviderError> {
-        let detected = Arc::new(detect_providers()?);
+        let detected = Arc::new((self.detector)()?);
         let result = detected
             .providers
             .values()
@@ -139,7 +170,7 @@ impl ProviderService {
         provider_id: ProviderId,
         workspace_id: &WorkspaceId,
         agent_session_id: &AgentSessionId,
-    ) -> Result<LaunchSpec, ProviderError> {
+    ) -> Result<PreparedAgentLaunch, ProviderError> {
         let workspace = self
             .workspace_service
             .resolve_for_terminal(workspace_id)
@@ -162,13 +193,36 @@ impl ProviderService {
             .as_deref()
             .ok_or(ProviderError::ProviderUnavailable(provider_id))?;
         let adapter = adapter(provider_id);
-        Ok(adapter.build_launch_spec(
+        let launch = adapter.build_launch_spec(
             executable,
             &cache.environment.values,
             Path::new(&workspace.canonical_path),
             workspace_id,
             agent_session_id,
-        ))
+        );
+        let executable_path = launch
+            .executable
+            .to_str()
+            .map(str::to_owned)
+            .ok_or(ProviderError::LaunchSnapshotInvalid)?;
+        let argv = launch
+            .argv
+            .iter()
+            .map(|argument| {
+                argument
+                    .to_str()
+                    .map(str::to_owned)
+                    .ok_or(ProviderError::LaunchSnapshotInvalid)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PreparedAgentLaunch {
+            launch,
+            snapshot: AgentLaunchSnapshot {
+                executable_path: Some(executable_path),
+                argv,
+                provider_version: detected.info.version.clone(),
+            },
+        })
     }
 
     pub fn pi_project_trust(
@@ -230,7 +284,7 @@ impl ProviderService {
         {
             return Ok(cache);
         }
-        let detected = Arc::new(detect_providers()?);
+        let detected = Arc::new((self.detector)()?);
         let mut guard = self.cache.lock().map_err(|_| ProviderError::Internal)?;
         Ok(guard.get_or_insert_with(|| detected.clone()).clone())
     }
@@ -930,6 +984,8 @@ pub enum ProviderError {
     LoginEnvironmentFailed,
     #[error("登录 Shell 环境格式无效")]
     LoginEnvironmentInvalid,
+    #[error("provider 启动快照包含无法持久化的路径或参数")]
+    LaunchSnapshotInvalid,
     #[error("无法找到可用的登录 Shell")]
     LoginShellUnavailable,
     #[error("无法读取 Pi 项目信任状态；请直接在 Pi TUI 中确认")]
@@ -958,6 +1014,7 @@ impl ProviderError {
             Self::Internal => "provider_internal",
             Self::LoginEnvironmentFailed => "login_environment_failed",
             Self::LoginEnvironmentInvalid => "login_environment_invalid",
+            Self::LaunchSnapshotInvalid => "provider_launch_snapshot_invalid",
             Self::LoginShellUnavailable => "login_shell_unavailable",
             Self::PiTrustUnknown => "pi_trust_unknown",
             Self::ProviderUnavailable(_) => "provider_unavailable",

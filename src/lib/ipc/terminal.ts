@@ -1,6 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 
 import type { TerminalAttachment, TerminalEvent, TerminalSession } from '$lib/domain/terminal';
+import type { SessionDetail } from '$lib/domain/session';
 
 export interface TerminalChannels {
 	output: Channel<number[] | Uint8Array>;
@@ -25,6 +26,7 @@ export interface TerminalApi {
 	): Promise<TerminalSession>;
 	stop(workspaceId: string, terminalId: string): Promise<TerminalSession>;
 	delete(workspaceId: string, terminalId: string): Promise<void>;
+	detail(workspaceId: string, terminalId: string): Promise<SessionDetail>;
 }
 
 export const terminalApi: TerminalApi = {
@@ -44,7 +46,8 @@ export const terminalApi: TerminalApi = {
 	resize: (workspaceId, terminalId, cols, rows) =>
 		invoke('resize_terminal', { workspaceId, terminalId, cols, rows }),
 	stop: (workspaceId, terminalId) => invoke('stop_terminal', { workspaceId, terminalId }),
-	delete: (workspaceId, terminalId) => invoke('delete_terminal', { workspaceId, terminalId })
+	delete: (workspaceId, terminalId) => invoke('delete_terminal', { workspaceId, terminalId }),
+	detail: (workspaceId, terminalId) => invoke('get_session_detail', { workspaceId, terminalId })
 };
 
 export const createTerminalChannels = (

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { TerminalSession } from '$lib/domain/terminal';
+import type { SessionDetail } from '$lib/domain/session';
 import type { TerminalApi } from '$lib/ipc/terminal';
 
 import { TerminalController } from './terminal.svelte';
@@ -18,7 +19,23 @@ const running = (workspaceId: string, id: string): TerminalSession => ({
 	startedAt: 2,
 	endedAt: null,
 	exitCode: null,
-	terminationReason: null
+	terminationReason: null,
+	sessionKind: 'shell'
+});
+
+const detail = (workspaceId: string, terminalId: string): SessionDetail => ({
+	terminal: running(workspaceId, terminalId),
+	agentSession: null,
+	lifecycleEvents: [],
+	logIndex: {
+		terminalId,
+		firstSequence: null,
+		lastSequence: null,
+		chunkCount: 0,
+		retainedBytes: 0,
+		coverage: 'complete',
+		updatedAt: 1
+	}
 });
 
 function api(overrides: Partial<TerminalApi> = {}): TerminalApi {
@@ -31,6 +48,7 @@ function api(overrides: Partial<TerminalApi> = {}): TerminalApi {
 		resize: vi.fn(),
 		stop: vi.fn().mockResolvedValue(running('workspace-a', 'terminal-a')),
 		delete: vi.fn().mockResolvedValue(undefined),
+		detail: vi.fn(),
 		...overrides
 	};
 }
@@ -136,5 +154,30 @@ describe('TerminalController', () => {
 		await vi.waitFor(() =>
 			expect(controller.state('workspace-b').activeTerminalId).toBe('terminal-b')
 		);
+	});
+
+	it('discards stale session-detail responses after workspace changes', async () => {
+		let resolveA: ((value: SessionDetail) => void) | undefined;
+		let resolveB: ((value: SessionDetail) => void) | undefined;
+		const client = api({
+			detail: vi.fn(
+				(workspaceId: string) =>
+					new Promise<SessionDetail>((resolve) => {
+						if (workspaceId === 'workspace-a') resolveA = resolve;
+						else resolveB = resolve;
+					})
+			)
+		});
+		const controller = new TerminalController(client);
+
+		const requestA = controller.loadDetail('workspace-a', 'terminal-a');
+		const requestB = controller.loadDetail('workspace-b', 'terminal-b');
+		resolveB?.(detail('workspace-b', 'terminal-b'));
+		await requestB;
+		resolveA?.(detail('workspace-a', 'terminal-a'));
+		await requestA;
+
+		expect(controller.detail?.terminal.workspaceId).toBe('workspace-b');
+		expect(controller.detailLoading).toBe(false);
 	});
 });

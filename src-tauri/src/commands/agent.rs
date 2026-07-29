@@ -4,6 +4,8 @@ use crate::{
     domain::{
         agent::{AgentSession, AgentSessionId},
         provider::ProviderId,
+        session::SessionDetail,
+        terminal::TerminalId,
         workspace::WorkspaceId,
     },
     services::agent::{AgentCommandError, AgentError, AgentManager},
@@ -68,6 +70,18 @@ pub async fn delete_agent_session(
 ) -> Result<(), AgentCommandError> {
     run_blocking(manager.inner().clone(), move |manager| {
         manager.delete(&workspace_id, &agent_session_id)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_session_detail(
+    workspace_id: WorkspaceId,
+    terminal_id: TerminalId,
+    manager: State<'_, AgentManager>,
+) -> Result<SessionDetail, AgentCommandError> {
+    run_blocking(manager.inner().clone(), move |manager| {
+        manager.detail(&workspace_id, &terminal_id)
     })
     .await
 }

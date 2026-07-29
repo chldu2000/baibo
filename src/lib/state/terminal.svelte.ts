@@ -1,6 +1,7 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 import type { CommandError } from '$lib/domain/workspace';
+import type { SessionDetail } from '$lib/domain/session';
 import type { TerminalEvent, TerminalSession } from '$lib/domain/terminal';
 import { terminalApi, type TerminalApi } from '$lib/ipc/terminal';
 import { normalizeCommandError } from '$lib/state/workspace.svelte';
@@ -16,9 +17,12 @@ interface WorkspaceTerminalState {
 export class TerminalController {
 	pendingAction = $state<TerminalAction | null>(null);
 	error = $state<CommandError | null>(null);
+	detail = $state<SessionDetail | null>(null);
+	detailLoading = $state(false);
 	#states = new SvelteMap<string, WorkspaceTerminalState>();
 	#api: TerminalApi;
 	#queuedLoadWorkspaceId: string | null = null;
+	#detailRequest = 0;
 
 	constructor(api: TerminalApi = terminalApi) {
 		this.#api = api;
@@ -177,6 +181,31 @@ export class TerminalController {
 
 	reportError = (error: unknown): void => {
 		this.error = normalizeCommandError(error);
+	};
+
+	loadDetail = async (workspaceId: string, terminalId: string): Promise<SessionDetail | null> => {
+		const request = ++this.#detailRequest;
+		this.detail = null;
+		this.detailLoading = true;
+		this.error = null;
+		try {
+			const detail = await this.#api.detail(workspaceId, terminalId);
+			if (request !== this.#detailRequest) return null;
+			this.detail = detail;
+			return detail;
+		} catch (error) {
+			if (request !== this.#detailRequest) return null;
+			this.error = normalizeCommandError(error);
+			return null;
+		} finally {
+			if (request === this.#detailRequest) this.detailLoading = false;
+		}
+	};
+
+	clearDetail = (): void => {
+		this.#detailRequest += 1;
+		this.detail = null;
+		this.detailLoading = false;
 	};
 
 	#set(workspaceId: string, state: WorkspaceTerminalState): void {

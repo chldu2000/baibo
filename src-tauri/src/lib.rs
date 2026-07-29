@@ -40,7 +40,7 @@ pub fn run() {
                 app_data_root,
             );
             let terminal_manager = services::terminal::TerminalManager::new(
-                persistence::TerminalRepository::new(database),
+                persistence::TerminalRepository::new(database.clone()),
                 workspace_service.clone(),
             );
             terminal_manager.recover().inspect_err(|error| {
@@ -55,6 +55,7 @@ pub fn run() {
             let agent_manager = services::agent::AgentManager::new(
                 provider_service.clone(),
                 terminal_manager.clone(),
+                persistence::AgentRepository::new(database),
             );
             app.manage(workspace_service);
             app.manage(terminal_manager);
@@ -87,6 +88,7 @@ pub fn run() {
             commands::agent::restart_agent_session,
             commands::agent::stop_agent_session,
             commands::agent::delete_agent_session,
+            commands::agent::get_session_detail,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baibo");

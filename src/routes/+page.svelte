@@ -29,6 +29,7 @@
 	let removeDialog: HTMLDialogElement;
 	let deleteTerminalDialog: HTMLDialogElement;
 	let newSessionDialog: HTMLDialogElement;
+	let sessionDetailDialog: HTMLDialogElement;
 	let terminalStage: HTMLElement | undefined;
 
 	const activeWorkspace = $derived(
@@ -148,6 +149,10 @@
 		if (created) {
 			terminals.updateSession(created.terminal);
 			newSessionDialog.close();
+		} else {
+			const createError = agents.error;
+			await Promise.all([terminals.load(activeWorkspace.id), agents.load(activeWorkspace.id)]);
+			agents.error = createError;
 		}
 	}
 
@@ -188,19 +193,38 @@
 		if (!activeWorkspace || !activeAgent) return;
 		const { cols, rows } = terminalDimensions();
 		const restarted = await agents.restart(activeWorkspace.id, activeAgent.id, cols, rows);
-		if (restarted) terminals.updateSession(restarted.terminal);
+		if (restarted) {
+			terminals.updateSession(restarted.terminal);
+		} else {
+			const restartError = agents.error;
+			await Promise.all([terminals.load(activeWorkspace.id), agents.load(activeWorkspace.id)]);
+			agents.error = restartError;
+		}
 	}
 
-	function sessionKind(session: TerminalSession): 'SHELL' | 'CODEX' | 'PI' {
+	function sessionKind(session: TerminalSession): 'SHELL' | 'AGENT' | 'CODEX' | 'PI' | 'LEGACY' {
 		const agent = activeWorkspace ? agents.byTerminal(activeWorkspace.id, session.id) : null;
 		if (agent?.providerId === 'codex') return 'CODEX';
 		if (agent?.providerId === 'pi') return 'PI';
-		if (session.title.startsWith('Codex ')) return 'CODEX';
-		if (session.title.startsWith('Pi ')) return 'PI';
-		const executable = session.shell.split('/').at(-1);
-		if (executable === 'codex') return 'CODEX';
-		if (executable === 'pi') return 'PI';
-		return 'SHELL';
+		if (session.sessionKind === 'agent') return 'AGENT';
+		return session.sessionKind === 'legacy' ? 'LEGACY' : 'SHELL';
+	}
+
+	async function showSessionDetail() {
+		if (!activeWorkspace || !activeTerminal) return;
+		terminals.clearDetail();
+		sessionDetailDialog.showModal();
+		await terminals.loadDetail(activeWorkspace.id, activeTerminal.id);
+	}
+
+	function formatTimestamp(value: number | null): string {
+		return value === null ? '—' : new Date(value).toLocaleString('zh-CN');
+	}
+
+	function formatBytes(value: number): string {
+		if (value < 1024) return `${value} B`;
+		if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`;
+		return `${(value / (1024 * 1024)).toFixed(2)} MiB`;
 	}
 
 	function providerAvailable(id: ProviderId): boolean {
@@ -507,6 +531,7 @@
 						</div>
 						{#if activeTerminal}
 							<div class="terminal-actions">
+								<button type="button" onclick={showSessionDetail}>详情</button>
 								{#if isRunning(activeTerminal)}
 									<button
 										type="button"
@@ -677,6 +702,131 @@
 </dialog>
 
 <dialog
+	class="session-detail-dialog"
+	bind:this={sessionDetailDialog}
+	aria-labelledby="session-detail-title"
+	onclose={() => terminals.clearDetail()}
+>
+	<div class="dialog-form session-detail">
+		<div class="detail-heading">
+			<div>
+				<p class="eyebrow">SESSION DETAIL</p>
+				<h2 id="session-detail-title">
+					{terminals.detail?.terminal.title ?? activeTerminal?.title ?? '会话详情'}
+				</h2>
+			</div>
+			<button type="button" onclick={() => sessionDetailDialog.close()}>关闭</button>
+		</div>
+		{#if terminals.detailLoading}
+			<p class="session-message" aria-live="polite">正在读取持久会话详情…</p>
+		{:else if terminals.detail}
+			{@const detail = terminals.detail}
+			<section class="detail-section" aria-labelledby="detail-metadata-title">
+				<h3 id="detail-metadata-title">基本信息</h3>
+				<dl class="detail-grid">
+					<div>
+						<dt>类型</dt>
+						<dd>{sessionKind(detail.terminal)}</dd>
+					</div>
+					<div>
+						<dt>状态</dt>
+						<dd>{terminalStatus(detail.terminal)}</dd>
+					</div>
+					<div>
+						<dt>Provider</dt>
+						<dd>{detail.agentSession?.providerId.toUpperCase() ?? '—'}</dd>
+					</div>
+					<div>
+						<dt>版本</dt>
+						<dd>{detail.agentSession?.launchSnapshot.providerVersion ?? '—'}</dd>
+					</div>
+					<div>
+						<dt>尺寸</dt>
+						<dd>{detail.terminal.cols}×{detail.terminal.rows}</dd>
+					</div>
+					<div>
+						<dt>创建时间</dt>
+						<dd>{formatTimestamp(detail.terminal.createdAt)}</dd>
+					</div>
+					<div class="detail-wide">
+						<dt>CWD</dt>
+						<dd><code>{detail.terminal.cwd}</code></dd>
+					</div>
+					<div class="detail-wide">
+						<dt>Executable</dt>
+						<dd>
+							<code
+								>{detail.agentSession?.launchSnapshot.executablePath ?? detail.terminal.shell}</code
+							>
+						</dd>
+					</div>
+					<div class="detail-wide">
+						<dt>Restart 来源</dt>
+						<dd><code>{detail.agentSession?.restartedFromSessionId ?? '—'}</code></dd>
+					</div>
+				</dl>
+				{#if detail.terminal.sessionKind === 'legacy'}
+					<p class="detail-warning" role="note">
+						旧记录的 Agent 身份不可可靠恢复；Baibo 不会根据标题或 executable 猜测 provider。
+					</p>
+				{/if}
+			</section>
+			<section class="detail-section" aria-labelledby="detail-lifecycle-title">
+				<h3 id="detail-lifecycle-title">生命周期</h3>
+				<ol class="lifecycle-list">
+					{#each detail.lifecycleEvents as event (event.sequence)}
+						<li>
+							<span>#{event.sequence} · {event.kind.toUpperCase()}</span>
+							<time datetime={new Date(event.occurredAt).toISOString()}>
+								{formatTimestamp(event.occurredAt)}
+							</time>
+							<small>
+								{event.reason ?? '—'}{event.exitCode === null ? '' : ` · EXIT ${event.exitCode}`}
+							</small>
+						</li>
+					{/each}
+				</ol>
+			</section>
+			<section class="detail-section" aria-labelledby="detail-log-title">
+				<h3 id="detail-log-title">终端日志</h3>
+				<dl class="detail-grid">
+					<div>
+						<dt>保留量</dt>
+						<dd>{formatBytes(detail.logIndex.retainedBytes)}</dd>
+					</div>
+					<div>
+						<dt>Chunks</dt>
+						<dd>{detail.logIndex.chunkCount}</dd>
+					</div>
+					<div>
+						<dt>Coverage</dt>
+						<dd>{detail.logIndex.coverage.toUpperCase()}</dd>
+					</div>
+					<div>
+						<dt>更新时间</dt>
+						<dd>{formatTimestamp(detail.logIndex.updatedAt)}</dd>
+					</div>
+				</dl>
+				{#if detail.logIndex.coverage !== 'complete'}
+					<p class="detail-warning" role="note">
+						{detail.logIndex.coverage === 'truncated'
+							? '日志受 2 MiB 上限或输出背压影响，仅保留最近字节。'
+							: '该记录来自 CP4 前，无法确认现有日志是否覆盖完整历史。'}
+					</p>
+				{/if}
+			</section>
+		{:else if terminals.error}
+			<div class="dialog-error" role="alert">
+				<strong>[{terminals.error.code}]</strong>
+				<span>{terminals.error.message}</span>
+			</div>
+		{:else}
+			<p class="session-message">没有可显示的会话详情。</p>
+		{/if}
+	</div>
+</dialog>
+
+<dialog
 	bind:this={renameDialog}
 	aria-labelledby="rename-title"
 	oncancel={guardDialogCancel}
@@ -772,7 +922,10 @@
 			<p class="eyebrow danger-text">REMOVE REGISTRATION</p>
 			<h2 id="remove-title">移除“{selectedWorkspace?.name}”的登记？</h2>
 		</div>
-		<p>只会从 Baibo 移除登记，不会删除目录、仓库、<code>.git</code> 或其中任何文件。</p>
+		<p>
+			会从 Baibo 删除该工作空间的会话、生命周期和回放日志；不会删除目录、仓库、<code>.git</code>
+			或其中任何文件。
+		</p>
 		{#if controller.error}
 			<div class="dialog-error" role="alert">
 				<strong>[{controller.error.code}]</strong>

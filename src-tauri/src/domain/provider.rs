@@ -26,6 +26,18 @@ impl fmt::Display for ProviderId {
     }
 }
 
+impl TryFrom<&str> for ProviderId {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "pi" => Ok(Self::Pi),
+            other => Err(format!("unknown provider id: {other}")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderAvailability {

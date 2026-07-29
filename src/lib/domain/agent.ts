@@ -11,4 +11,11 @@ export interface AgentSession {
 	isolationMode: 'workspace';
 	restartedFromSessionId: string | null;
 	createdAt: number;
+	launchSnapshot: AgentLaunchSnapshot;
+}
+
+export interface AgentLaunchSnapshot {
+	executablePath: string | null;
+	argv: string[];
+	providerVersion: string | null;
 }

@@ -30,6 +30,12 @@ The CP1 workspace-registry manual acceptance script is documented in
 The CP2 PTY terminal-runtime manual acceptance script is documented in
 [`docs/cp2-acceptance.md`](docs/cp2-acceptance.md).
 
+The CP3 provider-adapter manual acceptance script is documented in
+[`docs/cp3-acceptance.md`](docs/cp3-acceptance.md).
+
+The CP4 durable-session and recovery manual acceptance script is documented in
+[`docs/cp4-acceptance.md`](docs/cp4-acceptance.md).
+
 ## Development
 
 Prerequisites:

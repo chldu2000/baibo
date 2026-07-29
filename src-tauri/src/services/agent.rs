@@ -1,17 +1,16 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::domain::{
-    agent::{AgentIsolationMode, AgentLaunchMode, AgentSession, AgentSessionId},
+    agent::{AgentIsolationMode, AgentLaunchMode, AgentSession, AgentSessionId, NewAgentSession},
     provider::ProviderId,
+    session::SessionDetail,
     terminal::TerminalStatus,
     workspace::{WorkspaceId, WorkspaceRegistrySnapshot},
 };
+use crate::persistence::AgentRepository;
 
 use super::{
     provider::{ProviderError, ProviderService},
@@ -22,16 +21,20 @@ use super::{
 pub struct AgentManager {
     providers: ProviderService,
     terminals: TerminalManager,
-    sessions: Arc<Mutex<HashMap<AgentSessionId, AgentSession>>>,
+    repository: AgentRepository,
     operation_lock: Arc<Mutex<()>>,
 }
 
 impl AgentManager {
-    pub fn new(providers: ProviderService, terminals: TerminalManager) -> Self {
+    pub fn new(
+        providers: ProviderService,
+        terminals: TerminalManager,
+        repository: AgentRepository,
+    ) -> Self {
         Self {
             providers,
             terminals,
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            repository,
             operation_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -40,29 +43,7 @@ impl AgentManager {
         self.terminals
             .list(workspace_id)
             .map_err(AgentError::from_terminal)?;
-        let records: Vec<AgentSession> = self
-            .sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .values()
-            .filter(|session| &session.workspace_id == workspace_id)
-            .cloned()
-            .collect();
-        let mut sessions = Vec::with_capacity(records.len());
-        for mut session in records {
-            session.terminal = self
-                .terminals
-                .get(workspace_id, &session.terminal.id)
-                .map_err(AgentError::from_terminal)?;
-            sessions.push(session);
-        }
-        sessions.sort_by(|left, right| {
-            right
-                .created_at
-                .cmp(&left.created_at)
-                .then_with(|| left.id.as_str().cmp(right.id.as_str()))
-        });
-        Ok(sessions)
+        self.repository.list(workspace_id)
     }
 
     pub fn create(
@@ -101,6 +82,9 @@ impl AgentManager {
         ) {
             return Err(AgentError::StillRunning);
         }
+        self.providers
+            .refresh()
+            .map_err(AgentError::from_provider)?;
         self.create_locked(
             workspace_id,
             previous.provider_id,
@@ -119,16 +103,11 @@ impl AgentManager {
             .operation_lock
             .lock()
             .map_err(|_| AgentError::Internal)?;
-        let mut session = self.scoped(workspace_id, agent_session_id)?;
-        session.terminal = self
-            .terminals
+        let session = self.scoped(workspace_id, agent_session_id)?;
+        self.terminals
             .stop(workspace_id, &session.terminal.id)
             .map_err(AgentError::from_terminal)?;
-        self.sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .insert(session.id.clone(), session.clone());
-        Ok(session)
+        self.repository.get_scoped(workspace_id, agent_session_id)
     }
 
     pub fn delete(
@@ -144,16 +123,7 @@ impl AgentManager {
         self.terminals
             .delete(workspace_id, &session.terminal.id)
             .map_err(AgentError::from_terminal)?;
-        let removed = self
-            .sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .remove(agent_session_id);
-        if removed.is_some() {
-            Ok(())
-        } else {
-            Err(AgentError::not_found(agent_session_id))
-        }
+        Ok(())
     }
 
     pub fn remove_workspace(
@@ -164,15 +134,9 @@ impl AgentManager {
             .operation_lock
             .lock()
             .map_err(|_| AgentError::Internal)?;
-        let snapshot = self
-            .terminals
+        self.terminals
             .remove_workspace(workspace_id.clone())
-            .map_err(AgentError::from_terminal)?;
-        self.sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .retain(|_, session| session.workspace_id != workspace_id);
-        Ok(snapshot)
+            .map_err(AgentError::from_terminal)
     }
 
     fn create_locked(
@@ -184,47 +148,37 @@ impl AgentManager {
         restarted_from_session_id: Option<AgentSessionId>,
     ) -> Result<AgentSession, AgentError> {
         let id = AgentSessionId::new();
-        let launch = self
+        let prepared = self
             .providers
             .build_launch_spec(provider_id, &workspace_id, &id)
             .map_err(AgentError::from_provider)?;
-        let ordinal = self
-            .sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .values()
-            .filter(|session| {
-                session.workspace_id == workspace_id && session.provider_id == provider_id
-            })
-            .count()
-            + 1;
-        let title = format!(
-            "{} {ordinal}",
-            match provider_id {
-                ProviderId::Codex => "Codex",
-                ProviderId::Pi => "Pi",
-            }
-        );
-        let terminal = self
-            .terminals
-            .create_with_launch_spec(workspace_id.clone(), cols, rows, title, launch)
-            .map_err(AgentError::from_terminal)?;
-        let session = AgentSession {
-            id,
-            workspace_id,
+        let new_session = NewAgentSession {
+            id: id.clone(),
+            workspace_id: workspace_id.clone(),
             provider_id,
             provider_session_id: None,
-            created_at: terminal.created_at,
-            terminal,
             launch_mode: AgentLaunchMode::InteractivePty,
             isolation_mode: AgentIsolationMode::Workspace,
             restarted_from_session_id,
+            created_at: 0,
+            launch_snapshot: prepared.snapshot,
         };
-        self.sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .insert(session.id.clone(), session.clone());
-        Ok(session)
+        let terminal = self
+            .terminals
+            .create_agent_with_launch_spec(
+                workspace_id.clone(),
+                cols,
+                rows,
+                new_session,
+                prepared.launch,
+            )
+            .map_err(AgentError::from_terminal)?;
+        self.repository
+            .get_scoped(&workspace_id, &id)
+            .map(|mut session| {
+                session.terminal = terminal;
+                session
+            })
     }
 
     fn scoped(
@@ -232,13 +186,15 @@ impl AgentManager {
         workspace_id: &WorkspaceId,
         agent_session_id: &AgentSessionId,
     ) -> Result<AgentSession, AgentError> {
-        self.sessions
-            .lock()
-            .map_err(|_| AgentError::Internal)?
-            .get(agent_session_id)
-            .filter(|session| &session.workspace_id == workspace_id)
-            .cloned()
-            .ok_or_else(|| AgentError::not_found(agent_session_id))
+        self.repository.get_scoped(workspace_id, agent_session_id)
+    }
+
+    pub fn detail(
+        &self,
+        workspace_id: &WorkspaceId,
+        terminal_id: &crate::domain::terminal::TerminalId,
+    ) -> Result<SessionDetail, AgentError> {
+        self.repository.detail(workspace_id, terminal_id)
     }
 }
 
@@ -246,6 +202,8 @@ impl AgentManager {
 pub enum AgentError {
     #[error("Agent 会话内部状态不可用")]
     Internal,
+    #[error("Agent 会话数据库不可用")]
+    Database,
     #[error("未找到 Agent 会话 {0}")]
     NotFound(AgentSessionId),
     #[error("运行中的 Agent 会话不能重新开始")]
@@ -254,20 +212,24 @@ pub enum AgentError {
     Provider(ProviderError),
     #[error("{0}")]
     Terminal(TerminalError),
+    #[error("{0}")]
+    Workspace(crate::services::workspace::WorkspaceError),
 }
 
 impl AgentError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Internal => "agent_internal",
+            Self::Database => "agent_database_unavailable",
             Self::NotFound(_) => "agent_session_not_found",
             Self::StillRunning => "agent_session_still_running",
             Self::Provider(error) => error.code(),
             Self::Terminal(error) => error.code(),
+            Self::Workspace(error) => error.code(),
         }
     }
 
-    fn not_found(id: &AgentSessionId) -> Self {
+    pub(crate) fn not_found(id: &AgentSessionId) -> Self {
         Self::NotFound(id.clone())
     }
 
@@ -277,6 +239,14 @@ impl AgentError {
 
     fn from_terminal(error: TerminalError) -> Self {
         Self::Terminal(error)
+    }
+
+    pub(crate) fn database(_error: rusqlite::Error) -> Self {
+        Self::Database
+    }
+
+    pub(crate) fn from_workspace(error: crate::services::workspace::WorkspaceError) -> Self {
+        Self::Workspace(error)
     }
 }
 
@@ -317,7 +287,7 @@ mod tests {
 
     use crate::{
         domain::{provider::ProviderId, terminal::TerminalStatus},
-        persistence::{Database, TerminalRepository, WorkspaceRepository},
+        persistence::{AgentRepository, Database, TerminalRepository, WorkspaceRepository},
         services::{
             provider::ProviderService, terminal::TerminalManager, workspace::WorkspaceService,
         },
@@ -331,13 +301,19 @@ mod tests {
         workspace_a: crate::domain::workspace::WorkspaceId,
         workspace_b: crate::domain::workspace::WorkspaceId,
         fixture: PathBuf,
+        database_path: PathBuf,
     }
 
     impl Context {
         fn new() -> Self {
+            Self::new_with_executable(PathBuf::from("/bin/sh"))
+        }
+
+        fn new_with_executable(executable: PathBuf) -> Self {
             let temp = TempDir::new().expect("temp");
             let app_data = temp.path().join("app-data/baibo");
-            let database = Database::open(&app_data.join("baibo.sqlite3")).expect("database");
+            let database_path = app_data.join("baibo.sqlite3");
+            let database = Database::open(&database_path).expect("database");
             let repository = WorkspaceRepository::new(database.clone());
             let workspace_service = WorkspaceService::new(repository, app_data);
             let path_a = temp.path().join("workspace-a");
@@ -356,23 +332,34 @@ mod tests {
                 .expect("register B")
                 .active_workspace_id
                 .expect("active B");
-            let terminal_manager =
-                TerminalManager::new(TerminalRepository::new(database), workspace_service.clone());
+            let terminal_manager = TerminalManager::new(
+                TerminalRepository::new(database.clone()),
+                workspace_service.clone(),
+            );
             let provider_service = ProviderService::new_for_test(
                 workspace_service,
                 ProviderId::Codex,
-                PathBuf::from("/bin/sh"),
+                executable,
                 BTreeMap::from([
                     (OsString::from("HOME"), temp.path().as_os_str().to_owned()),
                     (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+                    (
+                        OsString::from("PROVIDER_SECRET"),
+                        OsString::from("must-not-persist"),
+                    ),
                 ]),
             );
             Self {
                 _temp: temp,
-                manager: AgentManager::new(provider_service, terminal_manager),
+                manager: AgentManager::new(
+                    provider_service,
+                    terminal_manager,
+                    AgentRepository::new(database),
+                ),
                 workspace_a,
                 workspace_b,
                 fixture,
+                database_path,
             }
         }
 
@@ -419,6 +406,7 @@ mod tests {
             .manager
             .restart(context.workspace_a.clone(), &first.id, 80, 24)
             .expect("restart");
+        assert_eq!(context.manager.providers.detection_count(), 1);
         assert_eq!(restarted.restarted_from_session_id, Some(first.id.clone()));
         assert_ne!(restarted.id, first.id);
         context
@@ -447,11 +435,10 @@ mod tests {
         assert!(context.fixture.exists());
         assert!(context
             .manager
-            .sessions
-            .lock()
-            .expect("sessions")
-            .values()
-            .all(|session| session.workspace_id != context.workspace_a));
+            .repository
+            .list(&context.workspace_a)
+            .expect("durable sessions")
+            .is_empty());
     }
 
     #[test]
@@ -485,5 +472,118 @@ mod tests {
             .expect("stop");
         worker.join().expect("stop worker");
         context.wait_for_finish(&session.terminal.id);
+    }
+
+    #[test]
+    fn persists_agent_identity_launch_snapshot_and_session_detail() {
+        let context = Context::new();
+        let created = context
+            .manager
+            .create(context.workspace_a.clone(), ProviderId::Codex, 80, 24)
+            .expect("create");
+        context
+            .manager
+            .stop(&context.workspace_a, &created.id)
+            .expect("stop");
+        context.wait_for_finish(&created.terminal.id);
+
+        let reopened = Database::open(&context.database_path).expect("reopen database");
+        let secret_count: i64 = reopened
+            .lock()
+            .expect("database")
+            .query_row(
+                "SELECT COUNT(*) FROM agent_sessions
+                 WHERE executable_path LIKE '%must-not-persist%'
+                    OR launch_argv_json LIKE '%must-not-persist%'
+                    OR provider_version LIKE '%must-not-persist%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("secret query");
+        let durable = AgentRepository::new(reopened)
+            .list(&context.workspace_a)
+            .expect("durable sessions");
+        let detail = context
+            .manager
+            .detail(&context.workspace_a, &created.terminal.id)
+            .expect("detail");
+
+        assert_eq!(durable.len(), 1);
+        assert_eq!(durable[0].id, created.id);
+        assert_eq!(
+            durable[0].launch_snapshot.executable_path.as_deref(),
+            Some("/bin/sh")
+        );
+        assert_eq!(
+            durable[0].launch_snapshot.provider_version.as_deref(),
+            Some("test")
+        );
+        assert!(durable[0].launch_snapshot.argv.is_empty());
+        assert_eq!(secret_count, 0);
+        assert_eq!(
+            detail.agent_session.as_ref().map(|session| &session.id),
+            Some(&created.id)
+        );
+        assert_eq!(
+            detail
+                .lifecycle_events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(detail.log_index.terminal_id, created.terminal.id);
+        assert_eq!(
+            context
+                .manager
+                .detail(&context.workspace_b, &created.terminal.id)
+                .expect_err("cross-workspace detail")
+                .code(),
+            "terminal_not_found"
+        );
+    }
+
+    #[test]
+    fn persists_failed_agent_when_the_detected_executable_is_unavailable() {
+        let context = Context::new_with_executable(PathBuf::from(
+            "/baibo-test/provider-executable-does-not-exist",
+        ));
+
+        assert_eq!(
+            context
+                .manager
+                .create(context.workspace_a.clone(), ProviderId::Codex, 80, 24)
+                .expect_err("missing executable")
+                .code(),
+            "terminal_spawn_failed"
+        );
+        let sessions = context
+            .manager
+            .list(&context.workspace_a)
+            .expect("durable failed agent");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].terminal.status, TerminalStatus::Failed);
+        let detail = context
+            .manager
+            .detail(&context.workspace_a, &sessions[0].terminal.id)
+            .expect("failed detail");
+        assert_eq!(
+            detail
+                .lifecycle_events
+                .iter()
+                .map(|event| event.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                crate::domain::terminal::LifecycleEventKind::Created,
+                crate::domain::terminal::LifecycleEventKind::Failed,
+            ]
+        );
+        assert_eq!(
+            detail
+                .lifecycle_events
+                .last()
+                .and_then(|event| event.reason.as_deref()),
+            Some("executable_unavailable")
+        );
     }
 }

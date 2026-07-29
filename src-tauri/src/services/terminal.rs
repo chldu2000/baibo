@@ -21,9 +21,10 @@ use thiserror::Error;
 
 use crate::{
     domain::{
+        agent::NewAgentSession,
         terminal::{
-            NewTerminalSession, TerminalAttachment, TerminalEvent, TerminalId, TerminalSession,
-            TerminalStatus, TerminalSubscriptionId,
+            NewTerminalSession, SessionKind, TerminalAttachment, TerminalEvent, TerminalId,
+            TerminalSession, TerminalStatus, TerminalSubscriptionId,
         },
         workspace::{WorkspaceId, WorkspaceRegistrySnapshot},
     },
@@ -227,6 +228,7 @@ impl TerminalManager {
             cols,
             rows,
             now: now_millis()?,
+            session_kind: SessionKind::Shell,
         })?;
 
         match self.spawn(starting.clone(), launch) {
@@ -302,7 +304,7 @@ impl TerminalManager {
                     PersistMessage::Data(data) => {
                         persist_chunk(&persist_repository, &persist_id, &data);
                         if persist_lag_marker.swap(false, Ordering::AcqRel) {
-                            persist_chunk(
+                            persist_truncation_marker(
                                 &persist_repository,
                                 &persist_id,
                                 OUTPUT_TRUNCATED_MARKER,
@@ -399,12 +401,12 @@ impl TerminalManager {
         Ok(running)
     }
 
-    pub(crate) fn create_with_launch_spec(
+    pub(crate) fn create_agent_with_launch_spec(
         &self,
         workspace_id: WorkspaceId,
         cols: u16,
         rows: u16,
-        title: String,
+        mut agent: NewAgentSession,
         launch: LaunchSpec,
     ) -> Result<TerminalSession, TerminalError> {
         validate_size(cols, rows)?;
@@ -419,32 +421,46 @@ impl TerminalManager {
         if launch.cwd != Path::new(&workspace.canonical_path) {
             return Err(TerminalError::InvalidLaunchSpec);
         }
+        let terminal_id = TerminalId::new();
+        let now = now_millis()?;
+        agent.created_at = now;
+        let starting = self.repository.create_agent(
+            NewTerminalSession {
+                id: terminal_id.clone(),
+                workspace_id: workspace_id.clone(),
+                title: String::new(),
+                auto_title: false,
+                shell: path_to_string(&launch.executable)?,
+                cwd: workspace.canonical_path,
+                cols,
+                rows,
+                now,
+                session_kind: SessionKind::Agent,
+            },
+            &agent,
+        )?;
         if !is_executable(&launch.executable) {
+            self.repository.finish(
+                &workspace_id,
+                &terminal_id,
+                TerminalStatus::Failed,
+                None,
+                "executable_unavailable",
+                now_millis().unwrap_or(starting.created_at),
+            )?;
             return Err(TerminalError::SpawnFailed);
         }
-        let terminal_id = TerminalId::new();
-        let starting = self.repository.create(NewTerminalSession {
-            id: terminal_id.clone(),
-            workspace_id: workspace_id.clone(),
-            title,
-            auto_title: false,
-            shell: path_to_string(&launch.executable)?,
-            cwd: workspace.canonical_path,
-            cols,
-            rows,
-            now: now_millis()?,
-        })?;
         match self.spawn(starting.clone(), launch) {
             Ok(session) => Ok(session),
             Err(error) => {
-                let _ = self.repository.finish(
+                self.repository.finish(
                     &workspace_id,
                     &terminal_id,
                     TerminalStatus::Failed,
                     None,
                     "spawn_failed",
                     now_millis().unwrap_or(starting.created_at),
-                );
+                )?;
                 Err(error)
             }
         }
@@ -686,6 +702,22 @@ fn persist_chunk(repository: &TerminalRepository, terminal_id: &TerminalId, data
     }
 }
 
+fn persist_truncation_marker(
+    repository: &TerminalRepository,
+    terminal_id: &TerminalId,
+    data: &[u8],
+) {
+    if let Err(error) =
+        repository.append_truncation_marker(terminal_id, data, now_millis().unwrap_or(0))
+    {
+        log::error!(
+            target: "baibo::terminal",
+            "terminal truncation marker persistence failed: {}",
+            error.code()
+        );
+    }
+}
+
 fn terminate_spawned_child(child: &mut dyn Child, process_group: Option<libc::pid_t>) {
     let group_killed = process_group
         .map(|process_group| unsafe { libc::kill(-process_group, libc::SIGKILL) == 0 })
@@ -807,6 +839,8 @@ pub enum TerminalError {
     InvalidInput,
     #[error("终端启动规格无效")]
     InvalidLaunchSpec,
+    #[error("终端状态转换无效")]
+    InvalidTransition,
     #[error("终端尺寸必须为 2–500 列、1–200 行")]
     InvalidSize,
     #[error("终端内部状态不可用")]
@@ -842,6 +876,7 @@ impl TerminalError {
             Self::Database => "terminal_database_unavailable",
             Self::InvalidInput => "invalid_terminal_input",
             Self::InvalidLaunchSpec => "invalid_terminal_launch_spec",
+            Self::InvalidTransition => "invalid_terminal_transition",
             Self::InvalidSize => "invalid_terminal_size",
             Self::Internal => "terminal_internal",
             Self::NotFound(_) => "terminal_not_found",

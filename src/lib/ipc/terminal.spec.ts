@@ -36,6 +36,7 @@ describe('terminalApi', () => {
 		await terminalApi.resize('workspace-a', 'terminal-a', 120, 40);
 		await terminalApi.stop('workspace-a', 'terminal-a');
 		await terminalApi.delete('workspace-a', 'terminal-a');
+		await terminalApi.detail('workspace-a', 'terminal-a');
 
 		expect(invoke.mock.calls).toEqual([
 			['list_terminals', { workspaceId: 'workspace-a' }],
@@ -66,7 +67,8 @@ describe('terminalApi', () => {
 				{ workspaceId: 'workspace-a', terminalId: 'terminal-a', cols: 120, rows: 40 }
 			],
 			['stop_terminal', { workspaceId: 'workspace-a', terminalId: 'terminal-a' }],
-			['delete_terminal', { workspaceId: 'workspace-a', terminalId: 'terminal-a' }]
+			['delete_terminal', { workspaceId: 'workspace-a', terminalId: 'terminal-a' }],
+			['get_session_detail', { workspaceId: 'workspace-a', terminalId: 'terminal-a' }]
 		]);
 	});
 

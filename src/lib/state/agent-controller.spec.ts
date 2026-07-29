@@ -23,12 +23,18 @@ const session = (workspaceId: string, id: string, terminalId: string): AgentSess
 		startedAt: 2,
 		endedAt: null,
 		exitCode: null,
-		terminationReason: null
+		terminationReason: null,
+		sessionKind: 'agent'
 	},
 	launchMode: 'interactivePty',
 	isolationMode: 'workspace',
 	restartedFromSessionId: null,
-	createdAt: 1
+	createdAt: 1,
+	launchSnapshot: {
+		executablePath: '/usr/local/bin/codex',
+		argv: [],
+		providerVersion: 'codex 1.0'
+	}
 });
 
 function api(overrides: Partial<AgentApi> = {}): AgentApi {
