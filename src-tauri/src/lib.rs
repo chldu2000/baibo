@@ -35,10 +35,23 @@ pub fn run() {
                         error.code()
                     );
                 })?;
-            app.manage(services::workspace::WorkspaceService::new(
-                persistence::WorkspaceRepository::new(database),
+            let workspace_service = services::workspace::WorkspaceService::new(
+                persistence::WorkspaceRepository::new(database.clone()),
                 app_data_root,
-            ));
+            );
+            let terminal_manager = services::terminal::TerminalManager::new(
+                persistence::TerminalRepository::new(database),
+                workspace_service.clone(),
+            );
+            terminal_manager.recover().inspect_err(|error| {
+                log::error!(
+                    target: "baibo::terminal",
+                    "terminal recovery failed: {}",
+                    error.code()
+                );
+            })?;
+            app.manage(workspace_service);
+            app.manage(terminal_manager);
 
             Ok(())
         })
@@ -49,6 +62,14 @@ pub fn run() {
             commands::workspace::open_workspace,
             commands::workspace::rename_workspace,
             commands::workspace::remove_workspace,
+            commands::terminal::list_terminals,
+            commands::terminal::create_terminal,
+            commands::terminal::attach_terminal,
+            commands::terminal::detach_terminal,
+            commands::terminal::write_terminal_input,
+            commands::terminal::resize_terminal,
+            commands::terminal::stop_terminal,
+            commands::terminal::delete_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Baibo");

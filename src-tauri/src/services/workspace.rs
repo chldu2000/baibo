@@ -9,7 +9,9 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    domain::workspace::{GitMetadata, NewWorkspace, WorkspaceId, WorkspaceRegistrySnapshot},
+    domain::workspace::{
+        GitMetadata, NewWorkspace, Workspace, WorkspaceId, WorkspaceRegistrySnapshot,
+    },
     persistence::WorkspaceRepository,
 };
 
@@ -29,6 +31,24 @@ impl WorkspaceService {
 
     pub fn list(&self) -> Result<WorkspaceRegistrySnapshot, WorkspaceError> {
         self.repository.snapshot()
+    }
+
+    pub fn get_registered(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
+        self.repository.get(id)
+    }
+
+    pub fn resolve_for_terminal(&self, id: &WorkspaceId) -> Result<Workspace, WorkspaceError> {
+        let workspace = self.repository.get(id)?;
+        self.validate_path(Path::new(&workspace.canonical_path))
+            .map_err(|error| match error {
+                WorkspaceError::PathNotFound
+                | WorkspaceError::NotDirectory
+                | WorkspaceError::PathUnreadable(_) => {
+                    WorkspaceError::unavailable(workspace.name.clone())
+                }
+                other => other,
+            })?;
+        Ok(workspace)
     }
 
     pub fn register_path(

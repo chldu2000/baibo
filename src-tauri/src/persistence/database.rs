@@ -12,6 +12,7 @@ use crate::services::workspace::WorkspaceError;
 
 const WORKSPACE_REGISTRY_MIGRATION: &str =
     include_str!("../../migrations/0001_workspace_registry.sql");
+const TERMINAL_RUNTIME_MIGRATION: &str = include_str!("../../migrations/0002_terminal_runtime.sql");
 
 #[derive(Clone)]
 pub struct Database {
@@ -60,7 +61,10 @@ fn configure(connection: &Connection) -> Result<(), WorkspaceError> {
 }
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(WORKSPACE_REGISTRY_MIGRATION)])
+    Migrations::new(vec![
+        M::up(WORKSPACE_REGISTRY_MIGRATION),
+        M::up(TERMINAL_RUNTIME_MIGRATION),
+    ])
 }
 
 #[cfg(test)]
@@ -88,6 +92,15 @@ mod tests {
             )
             .optional()
             .expect("schema query");
+        let terminal_table: Option<String> = connection
+            .query_row(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name = 'terminal_sessions'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("terminal schema query");
         let journal_mode: String = connection
             .query_row("PRAGMA journal_mode", [], |row| row.get(0))
             .expect("journal mode");
@@ -96,6 +109,7 @@ mod tests {
             .expect("foreign keys");
 
         assert_eq!(table.as_deref(), Some("workspaces"));
+        assert_eq!(terminal_table.as_deref(), Some("terminal_sessions"));
         assert_eq!(journal_mode, "wal");
         assert_eq!(foreign_keys, 1);
     }

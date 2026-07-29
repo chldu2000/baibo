@@ -3,7 +3,10 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     domain::workspace::{WorkspaceId, WorkspaceRegistrySnapshot},
-    services::workspace::{CommandError, WorkspaceService},
+    services::{
+        terminal::{TerminalCommandError, TerminalManager},
+        workspace::{CommandError, WorkspaceService},
+    },
 };
 
 #[tauri::command]
@@ -67,12 +70,16 @@ pub async fn rename_workspace(
 #[tauri::command]
 pub async fn remove_workspace(
     workspace_id: WorkspaceId,
-    service: State<'_, WorkspaceService>,
-) -> Result<WorkspaceRegistrySnapshot, CommandError> {
-    run_blocking(service.inner().clone(), move |service| {
-        service.remove(workspace_id)
-    })
-    .await
+    terminal_manager: State<'_, TerminalManager>,
+) -> Result<WorkspaceRegistrySnapshot, TerminalCommandError> {
+    let manager = terminal_manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.remove_workspace(workspace_id))
+        .await
+        .map_err(|_| TerminalCommandError {
+            code: "terminal_task_failed",
+            message: "工作空间任务异常结束".into(),
+        })?
+        .map_err(Into::into)
 }
 
 async fn run_blocking<T, F>(service: WorkspaceService, operation: F) -> Result<T, CommandError>

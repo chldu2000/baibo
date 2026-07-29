@@ -27,6 +27,9 @@ The implementation and acceptance sequence is documented in
 The CP1 workspace-registry manual acceptance script is documented in
 [`docs/cp1-acceptance.md`](docs/cp1-acceptance.md).
 
+The CP2 PTY terminal-runtime manual acceptance script is documented in
+[`docs/cp2-acceptance.md`](docs/cp2-acceptance.md).
+
 ## Development
 
 Prerequisites:
